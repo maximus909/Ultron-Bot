@@ -5,87 +5,153 @@ import numpy as np
 import pandas as pd
 from web3 import Web3
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 from telegram import Bot
-import sys
 import logging
 import requests
-import subprocess
-from base64 import b64encode
+import sys
 from dotenv import load_dotenv
 
-# 🔒 Auto-Configure Secrets (No User Input Needed)
-SECRETS = {
-    "ETH_RPC": "https://eth-mainnet.g.alchemy.com/v2/j1wuldAU_qeyF5YPJioufDd5MzkhHEpS",
-    "ARBITRUM_RPC": "https://arbitrum-mainnet.core.chainstack.com/4296e7a7c20359cb4dd5dd7fe182d3ff",
-    "TELEGRAM_BOT_TOKEN": "bot7594167836:AAGZyZFBac5CVocs6GAUQLJJQvYW6xueM7M",
-    "TELEGRAM_CHAT_ID": "2024398989",
-    "GITHUB_TOKEN": "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",
-}
-
-# 🛡️ Secure Secret Storage (Encrypt and Save to GitHub)
-def secure_secrets():
-    try:
-        headers = {
-            "Authorization": f"Bearer {SECRETS['GITHUB_TOKEN']}",
-            "Accept": "application/vnd.github.v3+json",
-        }
-        for secret_name, secret_value in SECRETS.items():
-            if secret_name == "GITHUB_TOKEN":
-                continue  # Skip the token itself
-            url = f"https://api.github.com/repos/{os.getenv('GITHUB_REPOSITORY')}/actions/secrets/{secret_name}"
-            data = {
-                "encrypted_value": b64encode(secret_value.encode()).decode(),
-                "key_id": subprocess.getoutput("curl -s https://api.github.com/repos/actions/secrets/public-key | jq -r .key_id")
-            }
-            requests.put(url, headers=headers, json=data)
-        # 🔄 Remove hardcoded secrets after securing them
-        global SECRETS
-        SECRETS = {}
-    except Exception as e:
-        logging.error(f"❌ Secret Auto-Config Failed: {e}")
-
-# 🚀 Initialize Bot
+# Load environment variables
 load_dotenv()
-logging.basicConfig(filename='ultron.log', level=logging.INFO, format='%(asctime)s - %(message)s')
-secure_secrets()  # Auto-secure secrets on first run
 
-# 🔗 Multi-Chain Setup
-w3 = {
-    "ETH": Web3(Web3.HTTPProvider(os.getenv("ETH_RPC")) if os.getenv("ETH_RPC") else None,
-    "ARBITRUM": Web3(Web3.HTTPProvider(os.getenv("ARBITRUM_RPC"))) if os.getenv("ARBITRUM_RPC") else None
+# Setup logging
+logging.basicConfig(filename='ultron.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+
+# Load secrets
+RPC_URLS = {
+    "ETH": os.getenv("ETH_RPC"),
+    "ARBITRUM": os.getenv("ARBITRUM_RPC"),
+    "BSC": os.getenv("BSC_RPC"),
+    "POLYGON": os.getenv("POLYGON_RPC"),
 }
 
-# 🤖 AI Core
-class SelfEvolvingAI:
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+
+# ✅ Initialize Web3 connections (FIXED)
+w3 = {}
+for chain, rpc in RPC_URLS.items():
+    try:
+        if rpc:
+            provider = Web3.HTTPProvider(rpc)
+            w3[chain] = Web3(provider)
+            if w3[chain].is_connected():
+                logging.info(f"✅ {chain} RPC connected successfully.")
+            else:
+                logging.info(f"⚠️ {chain} RPC failed to connect.")
+                del w3[chain]
+    except Exception as e:
+        logging.info(f"❌ Error connecting to {chain} RPC: {e}")
+        del w3[chain]
+
+if not w3:
+    logging.info("❌ CRITICAL ERROR: No working RPC connections. Exiting bot.")
+    sys.exit(1)
+else:
+    logging.info("🚀 Ultron started successfully!")
+
+# Telegram integration
+telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+def send_telegram(message):
+    try:
+        telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+    except Exception as e:
+        logging.info(f"❌ Telegram error: {e}")
+
+# GitHub integration
+def save_report(data):
+    try:
+        url = f"https://api.github.com/repos/{os.getenv('GITHUB_REPO')}/contents/report.json"
+        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            sha = response.json().get("sha")
+            content = json.dumps(data, indent=4)
+            payload = {
+                "message": "Update report",
+                "content": content.encode("base64").decode("utf-8"),
+                "sha": sha
+            }
+            requests.put(url, headers=headers, json=payload)
+            logging.info("✅ Report saved to GitHub.")
+    except Exception as e:
+        logging.info(f"❌ GitHub error: {e}")
+
+# AI model
+class AITrader:
     def __init__(self):
         self.model = RandomForestClassifier(n_estimators=100)
         self.data = []
-    
-    def retrain(self):
+        self.labels = []
+
+    def train(self):
         if len(self.data) >= 1000:
-            X = np.array([x[:-1] for x in self.data])
-            y = np.array([x[-1] for x in self.data])
-            self.model.fit(X, y)
+            X_train, X_test, y_train, y_test = train_test_split(self.data, self.labels, test_size=0.2)
+            self.model.fit(X_train, y_train)
+            accuracy = accuracy_score(y_test, self.model.predict(X_test))
+            send_telegram(f"🤖 Model retrained! Accuracy: {accuracy*100:.2f}%")
 
-# 📈 Trading Logic
-def execute_cross_chain_arbitrage():
-    # Add your MEV logic here
-    pass
+    def predict(self, tx_data):
+        try:
+            prediction = self.model.predict([tx_data])[0]
+            self.data.append(tx_data)
+            self.labels.append(prediction)
+            return prediction == 1
+        except Exception as e:
+            logging.info(f"❌ Prediction failed: {e}")
+            return False
 
-# 🔄 GitHub Self-Healing
-def self_update():
+# Trade execution
+def fetch_mempool(chain):
+    if chain not in w3:
+        return None
     try:
-        subprocess.run(["git", "pull", "origin", "main"], check=True)
-        subprocess.run(["git", "commit", "-am", "Ultron: Auto-Update"], check=True)
-        subprocess.run(["git", "push"], check=True)
+        pending_block = w3[chain].eth.get_block('pending', full_transactions=True)
+        txs = []
+        for tx in pending_block.transactions:
+            txs.append([tx['value'], tx['gasPrice'], tx['gas'], tx.get('maxFeePerGas', 0)])
+        return np.array(txs)
     except Exception as e:
-        logging.error(f"❌ Self-Update Failed: {e}")
+        logging.info(f"❌ Mempool error: {e}")
+        return None
+
+def execute_trade(chain, tx_data):
+    try:
+        account = w3[chain].eth.account.from_key(PRIVATE_KEY)
+        tx = {
+            'to': account.address,  # Replace with actual trade logic
+            'value': tx_data[0],
+            'gas': int(tx_data[2]),
+            'gasPrice': int(tx_data[1]),
+            'nonce': w3[chain].eth.get_transaction_count(account.address),
+            'chainId': w3[chain].eth.chain_id
+        }
+        signed_tx = account.sign_transaction(tx)
+        tx_hash = w3[chain].eth.send_raw_transaction(signed_tx.rawTransaction)
+        send_telegram(f"✅ Trade executed: {tx_hash.hex()}")
+    except Exception as e:
+        logging.info(f"❌ Trade failed: {e}")
+
+# Main loop
+def run():
+    ai = AITrader()
+    while True:
+        for chain in w3.keys():
+            txs = fetch_mempool(chain)
+            if txs is not None:
+                for tx in txs:
+                    if ai.predict(tx):
+                        execute_trade(chain, tx)
+        time.sleep(300)
 
 if __name__ == "__main__":
-    bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
-    bot.send_message(chat_id=os.getenv("TELEGRAM_CHAT_ID"), text="🚀 Ultron Activated!")
-    
-    while True:
-        execute_cross_chain_arbitrage()
-        self_update()  # Auto-evolve code
-        time.sleep(300)
+    try:
+        run()
+    except Exception as e:
+        send_telegram(f"❌ Ultron crashed: {e}")
+        sys.exit(1)
